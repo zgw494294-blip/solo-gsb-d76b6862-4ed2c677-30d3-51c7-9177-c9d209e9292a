@@ -405,6 +405,48 @@ table.speed-table {
 .harmonic-members { font-family: var(--mono); }
 .harmonic-members code { font-weight: 700; color: var(--accent-dark); }
 
+/* ---------- 最少制动轴方案 ---------- */
+.brake-check-head { margin-top: 12px; }
+.brake-checks {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+.brake-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 14px 4px 10px;
+  background: #fbfcfe;
+  font-size: 13px;
+  cursor: pointer;
+}
+.brake-check:not(.locked):hover { border-color: var(--accent); background: var(--accent-soft); }
+.brake-check.locked { opacity: .62; cursor: not-allowed; background: #f4f6fa; }
+.brake-check input { width: auto; }
+.brake-check .brake-shaft { font-family: var(--mono); }
+
+.brake-plan-list { margin: 0 0 14px; padding: 0; list-style: none; }
+.brake-plan-item {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 6px 0;
+  font-size: 14px;
+  background: #fbfcfe;
+}
+.brake-plan-item .step-no { font-size: 12px; color: var(--ink-soft); min-width: 48px; }
+.brake-plan-shafts { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.brake-chip {
+  display: inline-block;
+  font-family: var(--mono); font-weight: 700;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid #e6c1c1;
+  border-radius: 999px;
+  padding: 2px 12px;
+}
+.brake-chip.empty { color: var(--ink-soft); background: #eef1f6; border-color: var(--line); }
+
 .site-footer {
   color: var(--ink-soft);
   font-size: 12px;

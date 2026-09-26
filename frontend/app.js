@@ -5,9 +5,10 @@
 const LIMITS = { shafts: [2, 12], relations: [1, 24], known: [1, 4], tknown: [1, 12], tunknown: [1, 12] };
 
 const state = {
-  shafts: [1, 2, 3],
+  shafts: [1, 2, 3, 4],
   relations: [
     { type: 'planetary', s: '1', r: '2', c: '3', zs: '20', zr: '60' },
+    { type: 'external', a: '4', b: '2', za: '10', zb: '10' },
   ],
   known: [
     { shaft: '2', speed: '0' },    // 齿圈固定
@@ -22,6 +23,8 @@ const state = {
   },
   // 传动链路追踪：起点/终点轴编号（字符串，与轴列表的录入值对应）
   path: { start: '1', end: '3' },
+  // 最少制动轴方案：目标轴、保护轴（互异）与勾选的可制动轴（不含前两者）
+  brake: { target: '4', protected: '3', brakeable: ['1', '2'] },
 };
 
 // 各关系类型允许替换的齿数字段
@@ -304,6 +307,7 @@ function renderAll() {
   renderOptions();
   renderTorque();
   renderPath();
+  renderBrake();
 }
 
 // 传动链路追踪表单：起点/终点轴；轴被删除导致选择悬空时收回首/末根轴
@@ -314,6 +318,39 @@ function renderPath() {
   if (!ids.includes(String(p.end))) p.end = String(state.shafts[state.shafts.length - 1] ?? '');
   $('#path-start').innerHTML = shaftOptions(p.start, false);
   $('#path-end').innerHTML = shaftOptions(p.end, false);
+}
+
+// 最少制动轴方案表单：目标轴/保护轴下拉，其余轴作为可制动轴复选项。
+// 目标与保护相同在下拉上标红；目标/保护变化时把它们从可制动勾选集合中剔除。
+function renderBrake() {
+  const b = state.brake;
+  const ids = state.shafts.map(String);
+  if (!ids.includes(String(b.target))) b.target = String(state.shafts[0] ?? '');
+  if (!ids.includes(String(b.protected))) {
+    b.protected = String(state.shafts[state.shafts.length - 1] ?? '');
+  }
+  b.brakeable = b.brakeable.filter((s) => ids.includes(String(s)));
+
+  $('#brake-target').innerHTML = shaftOptions(b.target, false);
+  $('#brake-protected').innerHTML = shaftOptions(b.protected, false);
+  $('#brake-target').classList.toggle('invalid', String(b.target) === String(b.protected));
+  $('#brake-protected').classList.toggle('invalid', String(b.target) === String(b.protected));
+
+  const reserved = new Set([String(b.target), String(b.protected)]);
+  const checks = state.shafts.map((id) => {
+    const sid = String(id);
+    const locked = reserved.has(sid);
+    const checked = !locked && b.brakeable.includes(sid);
+    return `
+      <label class="brake-check${locked ? ' locked' : ''}">
+        <input type="checkbox" data-brake-shaft="${esc(sid)}" ${checked ? 'checked' : ''}
+               ${locked ? 'disabled' : ''} />
+        <span class="brake-shaft">轴 ${esc(sid)}</span>
+        ${locked ? `<span class="badge">${sid === String(b.target) ? '目标轴' : '保护轴'}</span>` : ''}
+      </label>`;
+  }).join('');
+  $('#brake-check-list').innerHTML = checks;
+  $('#brake-count').textContent = `${b.brakeable.length} / ${Math.max(state.shafts.length - 2, 0)}`;
 }
 
 /* ============================== 输入交互 ============================== */
@@ -355,12 +392,20 @@ function clearHarmonicsResult() {
   clearHarmonicHighlights();
 }
 
+// 制动方案结果同为独立区域，随任何录入变化清空
+function clearBrakeResult() {
+  const box = $('#brake-result');
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
 function clearAllResults() {
   clearResult();
   clearOptionsResult();
   clearTorqueResult();
   clearPathResult();
   clearHarmonicsResult();
+  clearBrakeResult();
 }
 
 function clearConflictHighlights() {
@@ -488,6 +533,8 @@ document.addEventListener('click', (e) => {
     void runPathTrace();
   } else if (act === 'mesh-harmonics') {
     void runMeshHarmonics();
+  } else if (act === 'brake-plans') {
+    void runBrakePlans();
   } else if (act === 'apply-option') {
     applyGearOption(btn.dataset.relation, btn.dataset.field, btn.dataset.teeth);
   }
@@ -600,6 +647,36 @@ $('#path-start').addEventListener('change', (e) => {
 $('#path-end').addEventListener('change', (e) => {
   clearAllResults();
   state.path.end = e.target.value;
+});
+
+// 最少制动轴方案表单：目标/保护轴改动后从可制动集合中剔除并清空旧结果
+$('#brake-target').addEventListener('change', (e) => {
+  clearAllResults();
+  state.brake.target = e.target.value;
+  state.brake.brakeable = state.brake.brakeable
+    .filter((s) => String(s) !== String(e.target.value) && String(s) !== String(state.brake.protected));
+  renderBrake();
+});
+$('#brake-protected').addEventListener('change', (e) => {
+  clearAllResults();
+  state.brake.protected = e.target.value;
+  state.brake.brakeable = state.brake.brakeable
+    .filter((s) => String(s) !== String(e.target.value) && String(s) !== String(state.brake.target));
+  renderBrake();
+});
+// 可制动轴复选框（事件委托，重渲染后仍然生效）
+document.addEventListener('change', (e) => {
+  const cb = e.target.closest('input[data-brake-shaft]');
+  if (!cb) return;
+  clearAllResults();
+  const sid = cb.dataset.brakeShaft;
+  if (cb.checked) {
+    if (!state.brake.brakeable.map(String).includes(sid)) state.brake.brakeable.push(sid);
+  } else {
+    state.brake.brakeable = state.brake.brakeable.filter((s) => String(s) !== sid);
+  }
+  $('#brake-count').textContent =
+    `${state.brake.brakeable.length} / ${Math.max(state.shafts.length - 2, 0)}`;
 });
 
 async function runGearOptions() {
@@ -1315,6 +1392,97 @@ function renderHarmonicsResult(data, payload) {
     </table>
     ${groupsHTML}`;
   highlightHarmonics(groups);
+}
+
+/* ============================== 最少制动轴方案 ============================== */
+
+async function runBrakePlans() {
+  const btn = $('#btn-brake');
+  const box = $('#brake-result');
+  btn.disabled = true;
+  btn.textContent = '枚举中…';
+  clearBrakeResult();
+  box.hidden = false;
+  try {
+    const base = buildPayload(); // 只使用轴与传动关系；已知转速、转矩均不参与
+    const payload = {
+      shafts: base.shafts,
+      relations: base.relations,
+      target: parseInt10(state.brake.target),
+      protected: parseInt10(state.brake.protected),
+      brakeable: state.brake.brakeable.map((s) => parseInt10(s)),
+    };
+    const resp = await fetch('/api/brake-plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      renderBrakeErrors(extractErrors(resp.status, data));
+    } else {
+      renderBrakeResult(data);
+    }
+  } catch (err) {
+    renderBrakeErrors([`网络或服务异常：${err.message}`]);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '求制动方案';
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+function renderBrakeErrors(errors) {
+  const box = $('#brake-result');
+  box.innerHTML = `
+    <div class="error-box">
+      <h3>制动方案输入有误，共 ${errors.length} 项：</h3>
+      <ul>${errors.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>
+    </div>`;
+}
+
+function renderBrakeResult(data) {
+  const box = $('#brake-result');
+  const plans = Array.isArray(data.plans) ? data.plans : [];
+  const head = `
+    <div class="banner ${data.status === 'ok' ? 'unique' : 'underdetermined'}">
+      ${data.status === 'ok'
+        ? `✓ 最少制动轴数 = ${esc(data.min_brakes)}`
+        : '△ 无可行制动方案'}
+      <span class="meta">目标轴 ${esc(data.target)} 须恒不转动，保护轴 ${esc(data.protected)} 必须保持可转；
+      共枚举 ${esc(data.candidate_count)} 个候选制动集合（含空集）。</span>
+    </div>
+    <div class="free-note">可制动轴：${
+      (data.brakeable || []).length
+        ? (data.brakeable || []).map((s) => `轴 ${esc(s)}`).join('、')
+        : '无（未勾选任何轴，仅评估空集）'
+    }。判定基于关系齐次方程 Aω = 0 的允许运动空间，全程有理数精确计算，不使用已知转速或转矩。</div>`;
+
+  if (data.status !== 'ok') {
+    box.innerHTML = `${head}
+      <div class="error-box options-empty">
+        <h3>无制动方案</h3>
+        <p>${esc(data.message || '没有任何候选制动集合满足要求。')}</p>
+      </div>`;
+    return;
+  }
+
+  const items = plans.map((plan, i) => {
+    const shafts = plan.length
+      ? plan.map((s) => `<span class="brake-chip">轴 ${esc(s)}</span>`).join('')
+      : '<span class="brake-chip empty">空集（不制动任何轴）</span>';
+    return `
+      <li class="brake-plan-item">
+        <span class="step-no">方案 ${i + 1}</span>
+        <span class="brake-plan-shafts">${shafts}</span>
+        <span class="badge solved">${plan.length} 根制动轴</span>
+      </li>`;
+  }).join('');
+  box.innerHTML = `${head}
+    <div class="options-meta">共 <strong>${plans.length}</strong> 个并列最优方案
+    （方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列）</div>
+    <ol class="brake-plan-list">${items}</ol>
+    <div class="free-note">${esc(data.message || '')}</div>`;
 }
 
 /* ============================== 启动 ============================== */

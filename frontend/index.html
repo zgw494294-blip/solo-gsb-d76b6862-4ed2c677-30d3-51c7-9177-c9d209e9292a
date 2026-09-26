@@ -10,7 +10,7 @@
   <header class="site-header">
     <div class="wrap">
       <h1><span class="gear">⚙</span> 齿轮系转速求解台</h1>
-      <p class="sub">录入轴、传动关系与已知转速，以有理数精确联立 &mdash; 外啮合 / 内啮合 / 行星轮系 · 目标配齿 · 理想传动转矩平衡 · 传动链路追踪 · 啮合谐波重合诊断</p>
+      <p class="sub">录入轴、传动关系与已知转速，以有理数精确联立 &mdash; 外啮合 / 内啮合 / 行星轮系 · 目标配齿 · 理想传动转矩平衡 · 传动链路追踪 · 啮合谐波重合诊断 · 最少制动轴方案</p>
     </div>
   </header>
 
@@ -108,6 +108,24 @@
       <p class="opt-note">复用上方轴、传动关系与已知转速（校验与“求解”一致）：外/内啮合基频 f = za·|ωa|/60 Hz，行星组基频 f = zs·|ωs−ωc|/60 Hz，全部有理数精确计算。模型无解时返回原有冲突定位；欠定时基频仍依赖自由变量的关系标为“未确定”且不参与比较，其余关系给出精确基频。对每条确定且非零的基频取 1～12 次谐波，按精确频率分组，只列出包含至少两条不同关系的重合组（组内按关系录入序号、谐波次数排序）；参与重合的关系在录入区紫色高亮。任何输入变更即清空诊断结果。</p>
     </section>
 
+    <section class="card" id="card-brake">
+      <div class="card-head">
+        <h2>⑧ 最少制动轴方案 <span class="hint">只使用轴与传动关系：目标轴须恒不转动，保护轴必须仍可转动</span></h2>
+        <button class="btn btn-primary" id="btn-brake" data-act="brake-plans">求制动方案</button>
+      </div>
+      <div class="grid">
+        <div class="field"><label>目标轴（制动后在所有允许运动中转速恒为零）</label>
+          <select id="brake-target"></select></div>
+        <div class="field"><label>保护轴（必须保持可转，即存在其转速非零的允许运动）</label>
+          <select id="brake-protected"></select></div>
+      </div>
+      <div class="sub-head brake-check-head">
+        <h3>可制动轴 <span class="hint">勾选允许施加制动的轴；不得包含目标轴与保护轴</span><span class="count" id="brake-count"></span></h3>
+      </div>
+      <div id="brake-check-list" class="brake-checks"></div>
+      <p class="opt-note">对每个候选制动集合，把所勾选轴的转速置零（ω = 0），与外/内啮合、行星组三类关系组成齐次有理数方程；仅当全部允许运动中目标轴转速恒为零、且存在保护轴转速非零的允许运动时集合有效。枚举可制动轴的全部子集（含空集），返回制动轴数最少的所有方案：方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列；空集本身有效时返回含一个空集合的方案列表，无任何有效方案时明确说明。任何输入变更即清空方案结果。</p>
+    </section>
+
     <div class="action-bar">
       <button class="btn btn-primary btn-lg" id="btn-solve" data-act="solve">求 解</button>
     </div>
@@ -117,6 +135,7 @@
     <section id="torque-result" class="result" hidden></section>
     <section id="path-result" class="result" hidden></section>
     <section id="harmonics-result" class="result" hidden></section>
+    <section id="brake-result" class="result" hidden></section>
   </main>
 
   <footer class="site-footer wrap">

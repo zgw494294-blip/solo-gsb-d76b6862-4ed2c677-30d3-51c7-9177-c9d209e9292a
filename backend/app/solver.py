@@ -39,10 +39,20 @@ Hz，全部有理数精确计算；模型无解时返回与 /api/solve 相同的
 其余关系给出精确基频。对每条确定且非零的基频取 1~12 次谐波，按精确频率
 分组，只列出包含至少两条不同关系的重合组；组按频率升序，组内成员按
 （关系录入序号, 谐波次数）升序。
+
+/api/brake-plans（最少制动轴方案）只复用轴/关系校验（不使用已知转速或
+转矩）：关系齐次方程 Aω=0 的零空间即允许运动空间。对可制动轴的每个子集
+B 追加 ω_j=0 的单位约束行后做有理数 RREF——目标轴在所有允许运动中转速
+恒为零 ⟺ 目标轴为主元列且其主元行自由列系数全为 0（等价于单位行 e_t 已
+落在行空间中）；保护轴仍能非零转动 ⟺ 保护轴是自由列或其主元行存在非零
+自由列系数（e_p 不在行空间中）。枚举可制动轴的全部子集（含空集），返回
+制动轴数最少的所有有效方案；方案内按轴录入顺序，方案间按该顺序的轴列表
+字典序排列。
 """
 
 from collections import deque
 from fractions import Fraction
+from itertools import combinations
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -130,6 +140,15 @@ class TransmissionPathsRequest(BaseModel):
     relations: list[Relation] | None = None
     start: int | str | None = None  # 起点轴编号
     end: int | str | None = None    # 终点轴编号
+
+
+class BrakePlansRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    shafts: list[Shaft] | None = None
+    relations: list[Relation] | None = None
+    target: int | str | None = None    # 目标轴（制动后须恒不转动）
+    protected: int | str | None = None  # 保护轴（必须仍可转动）
+    brakeable: list[int | str | None] | None = None  # 可制动轴（不含目标轴、保护轴）
 
 
 def _parse_teeth(name: str, value: object, errors: list[str]) -> int | None:
@@ -1126,4 +1145,167 @@ def mesh_harmonics(req: SolveRequest) -> dict:
         "harmonic_max": MAX_HARMONIC,
         "relations": relations_out,
         "groups": groups,
+    }
+
+
+def _brake_set_valid(
+    rel_rows: list[list[Fraction]],
+    n: int,
+    brake_cols: list[int],
+    target_col: int,
+    protected_col: int,
+) -> bool:
+    """判定一个候选制动集合是否有效（全程有理数）。
+
+    在关系齐次方程 Aω=0 上为每根制动轴追加单位约束行 ω_j=0 后做 RREF。
+      · 目标轴在所有允许运动中恒为零 ⟺ 目标轴是主元列且其主元行对所有
+        自由列的系数均为 0（单位行 e_target 已落在行空间中）；
+      · 保护轴仍存在转速非零的允许运动 ⟺ 保护轴是自由列，或其主元行存在
+        非零自由列系数（单位行 e_protected 不在行空间中）。
+    追加的都是齐次行，方程组永不会矛盾。
+    """
+    mat = [row[:] for row in rel_rows]
+    for j in brake_cols:
+        unit = [Fraction(0)] * (n + 1)
+        unit[j] = Fraction(1)
+        mat.append(unit)
+    pivot_cols = _rref(mat, n)
+    pivot_row_of = {c: i for i, c in enumerate(pivot_cols)}
+    free_cols = [j for j in range(n) if j not in pivot_row_of]
+
+    # 目标轴：主元行必须是只在目标列取 1 的单位行（ω_target = 0 被强制）
+    rt = pivot_row_of.get(target_col)
+    if rt is None or any(mat[rt][c] != 0 for c in free_cols):
+        return False
+
+    # 保护轴：自由列（可取任意转速），或主元行含非零自由列系数（随其非零）
+    if protected_col in pivot_row_of:
+        rp = pivot_row_of[protected_col]
+        if all(mat[rp][c] == 0 for c in free_cols):
+            return False
+    return True
+
+
+def brake_plans(req: BrakePlansRequest) -> dict:
+    """最少制动轴方案：枚举可制动轴全部子集，求制动轴数最少的有效方案。
+
+    轴与传动关系的校验和 /api/solve 完全复用（已知转速、转矩均不参与，故
+    不校验）。候选集合有效性的判定见 _brake_set_valid：仅当目标轴在所有
+    允许运动中转速恒为零、且存在保护轴转速非零的允许运动时有效。枚举可
+    制动轴的全部子集（含空集），保留有效集合中制动轴数最少的那些；方案内
+    轴按录入顺序排列，方案间按该顺序的轴列表字典序排列。目标轴与保护轴
+    相同、可制动轴重复或包含未知/目标/保护轴时返回 HTTP 400。
+    """
+    prepared = _prepare(req, with_known=False)
+    shaft_ids = prepared["shaft_ids"]
+    index = prepared["index"]
+    n = prepared["n"]
+    rel_rows = prepared["rows"]  # 仅传动关系齐次行：已知转速不参与
+
+    errors: list[str] = []
+
+    # ---------- 目标轴 / 保护轴 ----------
+    target_sid = _parse_int(req.target)
+    if target_sid is None:
+        errors.append("目标轴编号非法")
+    elif target_sid not in index:
+        errors.append(f"目标轴 {target_sid} 未在轴列表中定义")
+
+    protected_sid = _parse_int(req.protected)
+    if protected_sid is None:
+        errors.append("保护轴编号非法")
+    elif protected_sid not in index:
+        errors.append(f"保护轴 {protected_sid} 未在轴列表中定义")
+
+    if (
+        target_sid is not None and protected_sid is not None
+        and target_sid in index and protected_sid in index
+        and target_sid == protected_sid
+    ):
+        errors.append(f"目标轴与保护轴不能相同（均为轴 {target_sid}）")
+
+    # ---------- 可制动轴：可空（此时只有空集一个候选） ----------
+    if req.brakeable is None:
+        errors.append("缺少可制动轴列表 brakeable（不勾选任何轴时应传空数组）")
+        brakeable_sids: list[int] = []
+    else:
+        brakeable_sids = []
+        seen_brake: set[int] = set()
+        for k, raw in enumerate(req.brakeable):
+            sid = _parse_int(raw)
+            if sid is None:
+                errors.append(f"可制动轴 {k + 1}：轴编号非法")
+                continue
+            if sid not in index:
+                errors.append(f"可制动轴 {k + 1}：轴 {sid} 未在轴列表中定义")
+                continue
+            if sid in seen_brake:
+                errors.append(f"可制动轴 {k + 1}：轴 {sid} 重复勾选")
+                continue
+            if target_sid is not None and sid == target_sid:
+                errors.append(f"可制动轴 {k + 1}：轴 {sid} 是目标轴，不能同时作为可制动轴")
+            if protected_sid is not None and sid == protected_sid:
+                errors.append(f"可制动轴 {k + 1}：轴 {sid} 是保护轴，不能同时作为可制动轴")
+            seen_brake.add(sid)
+            brakeable_sids.append(sid)
+
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    assert target_sid is not None and protected_sid is not None
+    target_col = index[target_sid]
+    protected_col = index[protected_sid]
+    # 可制动轴按轴录入顺序排列：子集枚举、方案内排序与字典序均以此为准
+    brakeable_sids.sort(key=lambda s: index[s])
+    brakeable_cols = [index[s] for s in brakeable_sids]
+
+    # ---------- 枚举全部子集（共 2^k，k ≤ 轴数−2 ≤ 10），按规模从小到大 ----------
+    candidates = 1 << len(brakeable_cols)
+    best: list[tuple[int, ...]] = []
+    min_size: int | None = None
+    for size in range(len(brakeable_cols) + 1):
+        found = [
+            tuple(cols)
+            for cols in combinations(brakeable_cols, size)
+            if _brake_set_valid(rel_rows, n, list(cols), target_col, protected_col)
+        ]
+        if found:  # 按规模升序：首个出现有效集合的规模即最少制动轴数
+            best = found
+            min_size = size
+            break
+
+    base = {
+        "shafts": shaft_ids,
+        "target": target_sid,
+        "protected": protected_sid,
+        "brakeable": brakeable_sids,
+        "candidate_count": candidates,
+    }
+
+    if min_size is None:
+        return {
+            **base,
+            "status": "none",
+            "min_brakes": None,
+            "count": 0,
+            "plans": [],
+            "message": (
+                f"在全部 {candidates} 个候选制动集合（含空集）中，没有任何制动方案能"
+                f"使目标轴 {target_sid} 在所有允许运动中恒不转动、同时保护轴 {protected_sid} "
+                "仍可转动。请增加可制动轴或调整传动关系后重试。"
+            ),
+        }
+
+    best.sort()  # 按轴录入位置的轴列表字典序
+    return {
+        **base,
+        "status": "ok",
+        "min_brakes": min_size,
+        "count": len(best),
+        "plans": [[shaft_ids[c] for c in cols] for cols in best],
+        "message": (
+            f"候选集合共 {candidates} 个（含空集），按制动轴数由少到多评估："
+            f"最少需要制动 {min_size} 根轴，有 {len(best)} 个并列最优方案；每个方案下目标轴 "
+            f"{target_sid} 在所有允许运动中转速恒为零，且存在保护轴 {protected_sid} 转速非零的允许运动。"
+        ),
     }

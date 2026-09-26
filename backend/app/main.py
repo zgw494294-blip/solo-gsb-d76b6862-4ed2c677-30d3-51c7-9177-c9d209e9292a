@@ -6,6 +6,7 @@ API 路由优先于静态文件挂载：
   POST /api/torque-balance      理想传动转矩平衡：已知外加转矩 + 待求轴，精确求解
   POST /api/transmission-paths  传动链路追踪：最短链路总数、字典序最小链路与必经关系
   POST /api/mesh-harmonics      啮合谐波重合诊断：各关系基频 1~12 次谐波的跨关系重合
+  POST /api/brake-plans         最少制动轴方案：枚举可制动轴子集，求制动轴数最少的有效方案
   其余路径                      提供前端静态页面
 """
 
@@ -16,10 +17,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .solver import (
+    BrakePlansRequest,
     GearOptionsRequest,
     SolveRequest,
     TorqueBalanceRequest,
     TransmissionPathsRequest,
+    brake_plans,
     gear_options,
     mesh_harmonics,
     solve,
@@ -27,7 +30,7 @@ from .solver import (
     transmission_paths,
 )
 
-app = FastAPI(title="齿轮系转速求解台", version="1.4.0")
+app = FastAPI(title="齿轮系转速求解台", version="1.5.0")
 
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 
@@ -55,6 +58,11 @@ def api_transmission_paths(req: TransmissionPathsRequest) -> dict:
 @app.post("/api/mesh-harmonics")
 def api_mesh_harmonics(req: SolveRequest) -> dict:
     return mesh_harmonics(req)
+
+
+@app.post("/api/brake-plans")
+def api_brake_plans(req: BrakePlansRequest) -> dict:
+    return brake_plans(req)
 
 
 @app.get("/healthz")
