@@ -405,6 +405,28 @@ table.speed-table {
 .harmonic-members { font-family: var(--mono); }
 .harmonic-members code { font-weight: 700; color: var(--accent-dark); }
 
+/* ---------- 最少制动轴方案 ---------- */
+.brake-cols { margin-top: 12px; }
+.chk-group { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.chk {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px; font-family: var(--mono);
+  background: #fbfcfe; cursor: pointer;
+  user-select: none;
+}
+.chk input { width: auto; margin: 0; cursor: pointer; }
+.chk:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+.chk.chk-off { opacity: .55; cursor: not-allowed; }
+.chk.chk-off input { cursor: not-allowed; }
+.chk-note { font-size: 11px; font-weight: 400; color: var(--ink-soft); }
+
 .site-footer {
   color: var(--ink-soft);
   font-size: 12px;

@@ -39,10 +39,23 @@ Hz，全部有理数精确计算；模型无解时返回与 /api/solve 相同的
 其余关系给出精确基频。对每条确定且非零的基频取 1~12 次谐波，按精确频率
 分组，只列出包含至少两条不同关系的重合组；组按频率升序，组内成员按
 （关系录入序号, 谐波次数）升序。
+
+/api/brake-plans（最少制动轴方案）同样只复用轴/关系校验（不使用已知转速
+或转矩）：从轴中选定目标轴、必须保持可转的保护轴（≥1 根）与参与枚举的
+可制动轴（≥1 根，不得包含目标轴或保护轴）。对每个候选制动集合，把相应
+轴的转速置零约束（增广行 1*wi = 0）并入三类传动关系的齐次方程，做同一
+套有理数 RREF：仅当目标轴转速在零空间上恒为零（目标列成为主元列且其
+主元行不含任何自由列系数），且至少一根保护轴转速不恒为零（即存在保护
+轴转速非零的允许运动）时，集合有效。枚举可制动轴的全部子集（含空集），
+按制动轴数升序逐层枚举，首个出现有效方案的层即最少制动轴数，返回该层
+全部有效方案；方案内按轴录入顺序，方案间按该顺序的轴列表字典序排列
+（combinations 按轴录入顺序生成，同层枚举顺序即所求字典序）。空集有效
+时返回仅含一个空集合的方案列表；全部子集均无效时返回 no_plans 并说明。
 """
 
 from collections import deque
 from fractions import Fraction
+from itertools import combinations
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -58,6 +71,10 @@ MIN_TORQUE_KNOWN = 1
 MAX_TORQUE_KNOWN = MAX_SHAFTS    # 已知/待求互不相交，总数天然不超过轴数
 MIN_TORQUE_UNKNOWN = 1
 MAX_TORQUE_UNKNOWN = MAX_SHAFTS
+MIN_PROTECTED = 1
+MAX_PROTECTED = MAX_SHAFTS       # 保护轴/可制动轴互不相交，总数天然不超过轴数
+MIN_BRAKEABLE = 1
+MAX_BRAKEABLE = MAX_SHAFTS
 MAX_DIGITS = 18  # 数字位数上限，防止恶意超大整数导致运算爆炸
 MAX_HARMONIC = 12  # 啮合谐波重合诊断：每条确定且非零的基频取 1~12 次谐波
 
@@ -130,6 +147,15 @@ class TransmissionPathsRequest(BaseModel):
     relations: list[Relation] | None = None
     start: int | str | None = None  # 起点轴编号
     end: int | str | None = None    # 终点轴编号
+
+
+class BrakePlansRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    shafts: list[Shaft] | None = None
+    relations: list[Relation] | None = None
+    target: int | str | None = None                  # 目标轴编号（制动后转速恒为零）
+    protected: list[int | str | None] | None = None  # 必须保持可转的保护轴（≥1 根）
+    brakeable: list[int | str | None] | None = None  # 参与枚举的可制动轴（≥1 根）
 
 
 def _parse_teeth(name: str, value: object, errors: list[str]) -> int | None:
@@ -1126,4 +1152,157 @@ def mesh_harmonics(req: SolveRequest) -> dict:
         "harmonic_max": MAX_HARMONIC,
         "relations": relations_out,
         "groups": groups,
+    }
+
+
+def _forced_zero_after_brake(
+    rel_rows: list[list[Fraction]],
+    n: int,
+    brake_cols: tuple[int, ...],
+) -> list[bool]:
+    """对给定制动集合做有理数 RREF，返回各轴转速是否在零空间上恒为零。
+
+    制动即把相应轴的转速置零约束（增广行 1*wi = 0）并入传动关系的齐次
+    方程；齐次系统恒有零解，不会矛盾。轴 col 转速恒为零 ⟺ col 成为主元列
+    且其 RREF 主元行不含任何自由列系数（自由列时转速即自由变量本身）。
+    """
+    rows = [row[:] for row in rel_rows]
+    for c in brake_cols:
+        row = [Fraction(0)] * (n + 1)
+        row[c] = Fraction(1)
+        rows.append(row)
+    pivot_cols = _rref(rows, n)
+    pivot_row_of = {c: i for i, c in enumerate(pivot_cols)}
+    free_cols = [j for j in range(n) if j not in pivot_row_of]
+    return [
+        col in pivot_row_of and all(rows[pivot_row_of[col]][f] == 0 for f in free_cols)
+        for col in range(n)
+    ]
+
+
+def brake_plans(req: BrakePlansRequest) -> dict:
+    """最少制动轴方案：枚举可制动轴的全部子集，返回制动轴数最少的有效方案。
+
+    轴与传动关系的校验和 /api/solve 完全复用（已知转速、转矩均不参与，故
+    不校验）。候选制动集合有效 ⟺ 加入相应轴的转速置零约束后：目标轴转速
+    在所有允许运动中恒为零，且存在保护轴转速非零的允许运动（至少一根保护
+    轴转速不恒为零）。按制动轴数升序逐层枚举（combinations 按轴录入顺序
+    生成，同层枚举顺序即方案间所求的字典序），首个出现有效方案的层就是
+    答案；空集有效时返回仅含一个空集合的方案列表；全部子集均无效时返回
+    no_plans 并说明。
+    """
+    prepared = _prepare(req, with_known=False)
+    shaft_ids = prepared["shaft_ids"]
+    index = prepared["index"]
+    n = prepared["n"]
+    rel_rows = prepared["rows"]  # 仅传动关系行：已知转速、转矩不参与
+
+    errors: list[str] = []
+
+    # ---------- 目标轴 ----------
+    target = _parse_int(req.target)
+    if target is None:
+        errors.append("目标轴编号非法")
+    elif target not in index:
+        errors.append(f"目标轴 {target} 未在轴列表中定义")
+
+    # ---------- 保护轴（必须保持可转，≥1 根，不能是目标轴） ----------
+    if not req.protected:
+        errors.append("请至少选择 1 根保护轴")
+    elif len(req.protected) > MAX_PROTECTED:
+        errors.append(f"保护轴最多 {MAX_PROTECTED} 根（当前 {len(req.protected)}）")
+
+    protected_set: set[int] = set()
+    for k, raw in enumerate(req.protected or []):
+        sid = _parse_int(raw)
+        if sid is None:
+            errors.append(f"保护轴 {k + 1}：轴编号非法")
+            continue
+        if sid not in index:
+            errors.append(f"保护轴 {k + 1}：轴 {sid} 未在轴列表中定义")
+            continue
+        if sid in protected_set:
+            errors.append(f"保护轴 {k + 1}：轴 {sid} 重复选择")
+            continue
+        if target is not None and sid == target:
+            errors.append(
+                f"保护轴 {k + 1}：轴 {sid} 与目标轴相同，"
+                "目标轴须制动停转、保护轴须保持可转，二者不能相同"
+            )
+            continue
+        protected_set.add(sid)
+
+    # ---------- 可制动轴（参与枚举，≥1 根，不得包含目标轴或保护轴） ----------
+    if not req.brakeable:
+        errors.append("请至少勾选 1 根可制动轴")
+    elif len(req.brakeable) > MAX_BRAKEABLE:
+        errors.append(f"可制动轴最多 {MAX_BRAKEABLE} 根（当前 {len(req.brakeable)}）")
+
+    brakeable_set: set[int] = set()
+    for k, raw in enumerate(req.brakeable or []):
+        sid = _parse_int(raw)
+        if sid is None:
+            errors.append(f"可制动轴 {k + 1}：轴编号非法")
+            continue
+        if sid not in index:
+            errors.append(f"可制动轴 {k + 1}：轴 {sid} 未在轴列表中定义")
+            continue
+        if sid in brakeable_set:
+            errors.append(f"可制动轴 {k + 1}：轴 {sid} 重复勾选")
+            continue
+        if target is not None and sid == target:
+            errors.append(f"可制动轴 {k + 1}：轴 {sid} 是目标轴，可制动轴不得包含目标轴或保护轴")
+            continue
+        if sid in protected_set:
+            errors.append(f"可制动轴 {k + 1}：轴 {sid} 是保护轴，可制动轴不得包含目标轴或保护轴")
+            continue
+        brakeable_set.add(sid)
+
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    # 统一按轴录入顺序排列：方案内顺序与方案间字典序随之确定
+    protected_ids = sorted(protected_set, key=lambda s: index[s])
+    brakeable_ids = sorted(brakeable_set, key=lambda s: index[s])
+    target_col = index[target]
+    protected_cols = [index[s] for s in protected_ids]
+    brakeable_cols = [index[s] for s in brakeable_ids]
+
+    base = {
+        "shafts": shaft_ids,
+        "target": target,
+        "protected": protected_ids,
+        "brakeable": brakeable_ids,
+    }
+
+    # ---------- 按制动轴数升序逐层枚举：首个出现有效方案的层即最少 ----------
+    for size in range(0, len(brakeable_cols) + 1):
+        plans = []
+        for combo in combinations(brakeable_cols, size):
+            forced = _forced_zero_after_brake(rel_rows, n, combo)
+            if not forced[target_col]:
+                continue  # 目标轴转速未恒为零
+            if all(forced[c] for c in protected_cols):
+                continue  # 保护轴全被迫停转：不存在保护轴转速非零的允许运动
+            plans.append({"brakes": [shaft_ids[c] for c in combo]})
+        if plans:
+            return {
+                **base,
+                "status": "ok",
+                "min_brakes": size,
+                "count": len(plans),
+                "plans": plans,
+            }
+
+    return {
+        **base,
+        "status": "no_plans",
+        "min_brakes": None,
+        "count": 0,
+        "plans": [],
+        "message": (
+            f"已枚举可制动轴的全部 {2 ** len(brakeable_cols)} 个子集（含空集）："
+            f"没有任何子集既使目标轴 {target} 的转速在所有允许运动中恒为零，"
+            "又保留保护轴转速非零的允许运动。请调整目标轴、保护轴或可制动轴的划分。"
+        ),
     }
